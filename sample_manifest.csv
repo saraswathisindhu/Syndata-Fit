@@ -1,0 +1,6 @@
+frame,action,joint_count,image,annotation,visualization
+1,jogging,17,sample_dataset\images\frame_0001.png,sample_dataset\annotations\frame_0001.json,sample_dataset\visualizations\frame_0001_skeleton.png
+25,jogging,17,sample_dataset\images\frame_0025.png,sample_dataset\annotations\frame_0025.json,sample_dataset\visualizations\frame_0025_skeleton.png
+50,jogging,17,sample_dataset\images\frame_0050.png,sample_dataset\annotations\frame_0050.json,sample_dataset\visualizations\frame_0050_skeleton.png
+75,jogging,17,sample_dataset\images\frame_0075.png,sample_dataset\annotations\frame_0075.json,sample_dataset\visualizations\frame_0075_skeleton.png
+100,jogging,17,sample_dataset\images\frame_0100.png,sample_dataset\annotations\frame_0100.json,sample_dataset\visualizations\frame_0100_skeleton.png

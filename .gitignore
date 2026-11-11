@@ -1,0 +1,29 @@
+
+# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Annotation backups
+*.json.bak
+
+# Temporary files
+*.tmp
+*.log
+
+# Full generated dataset
+Syndata_Output/
+
+# Full set of generated visualizations
+visualized_frames/
+
+# Local editor settings
+.vscode/
+
+# Full dataset manifest (local paths)
+manifest.csv
+
+# One-time annotation repair script
+fix_annotations.py
