@@ -1,114 +1,140 @@
 
+
 import csv
 import json
 import os
 from pathlib import Path
 
-# Project folder
+# ==========================================
+# SYNDATA-FIT MULTI-ACTION MANIFEST
+# ==========================================
+
 BASE_DIR = Path(__file__).resolve().parent
 
-# Automatically locate the dataset
 DATASET_CANDIDATES = [
-    (
-        BASE_DIR / "Syndata_Output",
-        BASE_DIR / "visualized_frames"
-    ),
-    (
-        BASE_DIR.parent / "New folder" / "Syndata_Output",
-        BASE_DIR / "visualized_frames"
-    ),
-    (
-        BASE_DIR / "sample_dataset",
-        BASE_DIR / "sample_dataset" / "visualizations"
-    )
+    BASE_DIR.parent / "New folder" / "Syndata_Output",
+    BASE_DIR / "Syndata_Output"
 ]
-DATASET = None
-VISUALIZATION_FOLDER = None
 
-for dataset_path, visualization_path in DATASET_CANDIDATES:
+DATASET_ROOT = next(
+    (
+        folder for folder in DATASET_CANDIDATES
+        if (folder / "jogging").is_dir()
+        and (folder / "walking").is_dir()
+    ),
+    None
+)
 
-    if (
-        (dataset_path / "images").is_dir()
-        and (dataset_path / "annotations").is_dir()
-        and visualization_path.is_dir()
-    ):
-        DATASET = dataset_path
-        VISUALIZATION_FOLDER = visualization_path
-        break
-
-if DATASET is None:
+if DATASET_ROOT is None:
     raise FileNotFoundError(
-        "Dataset or visualization folders not found."
+        "Could not locate the jogging and walking dataset folders."
     )
 
-IMAGE_FOLDER = DATASET / "images"
-ANNOTATION_FOLDER = DATASET / "annotations"
-
-# Manifest output
 MANIFEST_PATH = BASE_DIR / "manifest.csv"
 
 rows = []
 errors = []
 
-# Find available images
-image_files = sorted(IMAGE_FOLDER.glob("frame_*.png"))
+# Process each action separately
+for action in ["jogging", "walking"]:
 
-for image_path in image_files:
+    DATASET = DATASET_ROOT / action
 
-    try:
-        frame_number = int(
-            image_path.stem.replace("frame_", "")
-        )
+    IMAGE_FOLDER = DATASET / "images"
+    ANNOTATION_FOLDER = DATASET / "annotations"
+    VISUALIZATION_FOLDER = DATASET / "visualizations"
 
-        filename = f"frame_{frame_number:04d}"
+    if not IMAGE_FOLDER.is_dir():
+        errors.append(f"{action}: Images folder missing")
+        continue
 
-        annotation_path = (
-            ANNOTATION_FOLDER / f"{filename}.json"
-        )
+    if not ANNOTATION_FOLDER.is_dir():
+        errors.append(f"{action}: Annotations folder missing")
+        continue
 
-        visualization_path = (
-            VISUALIZATION_FOLDER /
-            f"{filename}_skeleton.png"
-        )
+    if not VISUALIZATION_FOLDER.is_dir():
+        errors.append(f"{action}: Visualizations folder missing")
+        continue
 
-        # Check annotation
-        if not annotation_path.exists():
-            errors.append(f"Missing annotation: {filename}")
-            continue
+    image_files = sorted(IMAGE_FOLDER.glob("frame_*.png"))
 
-        # Check visualization
-        if not visualization_path.exists():
-            errors.append(f"Missing visualization: {filename}")
-            continue
+    print(f"\nProcessing action: {action}")
+    print("Images found:", len(image_files))
 
-        # Read annotation information
-        with open(
-            annotation_path, "r", encoding="utf-8"
-        ) as file:
-            data = json.load(file)
+    for image_path in image_files:
 
-        # Store paths relative to project folder
-        rows.append({
-            "frame": frame_number,
-            "action": data["action"],
-            "joint_count": len(data["joints"]),
-            "image": os.path.relpath(
-                image_path.resolve(), BASE_DIR
-            ),
-            "annotation": os.path.relpath(
-                annotation_path.resolve(), BASE_DIR
-            ),
-            "visualization": os.path.relpath(
-                visualization_path.resolve(), BASE_DIR
+        try:
+            frame_number = int(
+                image_path.stem.replace("frame_", "")
             )
-        })
 
-    except Exception as error:
-        errors.append(
-            f"{image_path.name}: {error}"
-        )
+            filename = f"frame_{frame_number:04d}"
 
-# Write CSV
+            annotation_path = (
+                ANNOTATION_FOLDER / f"{filename}.json"
+            )
+
+            visualization_path = (
+                VISUALIZATION_FOLDER /
+                f"{filename}_skeleton.png"
+            )
+
+            if not annotation_path.exists():
+                errors.append(
+                    f"{action}: Missing annotation {filename}"
+                )
+                continue
+
+            if not visualization_path.exists():
+                errors.append(
+                    f"{action}: Missing visualization {filename}"
+                )
+                continue
+
+            with open(
+                annotation_path, "r", encoding="utf-8"
+            ) as file:
+                data = json.load(file)
+
+            if data.get("action") != action:
+                errors.append(
+                    f"{action}: Incorrect action label in {filename}"
+                )
+                continue
+
+            if data.get("frame") != frame_number:
+                errors.append(
+                    f"{action}: Frame number mismatch in {filename}"
+                )
+                continue
+
+            if len(data.get("joints", {})) != 17:
+                errors.append(
+                    f"{action}: Incorrect joint count in {filename}"
+                )
+                continue
+
+            rows.append({
+                "frame": frame_number,
+                "action": action,
+                "joint_count": len(data["joints"]),
+                "image": os.path.relpath(
+                    image_path.resolve(), BASE_DIR
+                ),
+                "annotation": os.path.relpath(
+                    annotation_path.resolve(), BASE_DIR
+                ),
+                "visualization": os.path.relpath(
+                    visualization_path.resolve(), BASE_DIR
+                )
+            })
+
+        except Exception as error:
+            errors.append(
+                f"{action}/{image_path.name}: {error}"
+            )
+
+# Write combined CSV
 columns = [
     "frame",
     "action",
@@ -124,27 +150,42 @@ with open(
     newline="",
     encoding="utf-8"
 ) as file:
+
     writer = csv.DictWriter(
         file,
         fieldnames=columns
     )
+
     writer.writeheader()
     writer.writerows(rows)
 
 # Final report
-print("\n===== SYNDATA-FIT MANIFEST =====")
-print("Dataset:", DATASET.resolve())
-print("Frames found:", len(image_files))
+jogging_count = sum(
+    1 for row in rows if row["action"] == "jogging"
+)
+
+walking_count = sum(
+    1 for row in rows if row["action"] == "walking"
+)
+
+print("\n===== SYNDATA-FIT MULTI-ACTION MANIFEST =====")
+print("Dataset root:", DATASET_ROOT)
+print("Jogging records:", jogging_count)
+print("Walking records:", walking_count)
 print("Total records:", len(rows))
 print("Errors:", len(errors))
 
 for error in errors:
-    print(error)
+    print("ERROR:", error)
 
-if len(rows) == len(image_files) and len(image_files) > 0 and len(errors) == 0:
-    print("SUCCESS: Manifest created for all available frames!")
+if (
+    jogging_count == 100
+    and walking_count == 100
+    and len(rows) == 200
+    and len(errors) == 0
+):
+    print("\nSUCCESS: Both action datasets added to manifest!")
 else:
-    print("WARNING: Check missing files or processing errors.")
+    print("\nWARNING: Check dataset records and errors.")
 
-print("Manifest:", MANIFEST_PATH)
-
+print("Manifest saved:", MANIFEST_PATH)

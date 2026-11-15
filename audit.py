@@ -6,182 +6,170 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-DATASET_CONFIGS = [
-    {
-        "name": "FULL DATASET",
-        "dataset": BASE_DIR / "Syndata_Output",
-        "visualizations": BASE_DIR / "visualized_frames",
-        "manifest": BASE_DIR / "manifest.csv",
-    },
-    {
-        "name": "FULL DATASET",
-        "dataset": BASE_DIR.parent / "New folder" / "Syndata_Output",
-        "visualizations": BASE_DIR / "visualized_frames",
-        "manifest": BASE_DIR / "manifest.csv",
-    },
-    {
-        "name": "GITHUB SAMPLE",
-        "dataset": BASE_DIR / "sample_dataset",
-        "visualizations": BASE_DIR / "sample_dataset" / "visualizations",
-        "manifest": BASE_DIR / "sample_manifest.csv",
-    },
-]
+DATASET_ROOT = (
+    BASE_DIR.parent / "New folder" / "Syndata_Output"
+)
+
+MANIFEST_PATH = BASE_DIR / "manifest.csv"
+SAMPLE_ROOT = BASE_DIR / "sample_dataset"
+SAMPLE_MANIFEST = BASE_DIR / "sample_manifest.csv"
 
 EXPECTED_JOINTS = {
-    "head", "neck",
-    "left_shoulder", "right_shoulder",
-    "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist",
-    "left_hip", "right_hip",
-    "left_knee", "right_knee",
-    "left_ankle", "right_ankle",
-    "left_toe", "right_toe", "hips"
+    "head", "neck", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist",
+    "left_hip", "right_hip", "left_knee", "right_knee",
+    "left_ankle", "right_ankle", "left_toe", "right_toe", "hips"
 }
 
+EXPECTED_ACTIONS = ["jogging", "walking"]
 
-def audit_dataset(config):
 
-    dataset = config["dataset"]
-    image_folder = dataset / "images"
-    annotation_folder = dataset / "annotations"
-    visualization_folder = config["visualizations"]
-    manifest_path = config["manifest"]
+def check_annotation(json_path, expected_frame, expected_action):
+    with open(json_path, "r", encoding="utf-8") as file:
+        data = json.load(file)
 
     errors = []
-    checked_frames = 0
 
-    image_files = sorted(image_folder.glob("frame_*.png"))
+    if data.get("frame") != expected_frame:
+        errors.append("Incorrect frame number")
 
-    print(f"\n===== {config['name']} AUDIT =====")
-    print("Dataset:", dataset.resolve())
-    print("Frames found:", len(image_files))
+    if data.get("action") != expected_action:
+        errors.append("Incorrect action label")
 
-    for image_path in image_files:
+    joints = data.get("joints", {})
 
-        filename = image_path.stem
+    if set(joints.keys()) != EXPECTED_JOINTS:
+        errors.append("Incorrect joint names")
+
+    for name, joint in joints.items():
+        coords_3d = joint.get("3d")
+        coords_2d = joint.get("2d")
+        in_frame = joint.get("in_frame")
+
+        if not isinstance(coords_3d, list) or len(coords_3d) != 3:
+            errors.append(f"Invalid 3D coordinates: {name}")
+            continue
+
+        if not isinstance(coords_2d, list) or len(coords_2d) != 2:
+            errors.append(f"Invalid 2D coordinates: {name}")
+            continue
+
+        coordinates = coords_3d + coords_2d
+
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in coordinates
+        ):
+            errors.append(f"Invalid numeric values: {name}")
+
+        if not isinstance(in_frame, bool):
+            errors.append(f"Invalid in_frame flag: {name}")
+
+        elif in_frame:
+            x, y = coords_2d
+            if not (0 <= x <= 1 and 0 <= y <= 1):
+                errors.append(f"Out-of-bounds joint: {name}")
+
+    return errors
+
+
+def audit_full_dataset():
+    print("\n===== SYNDATA-FIT FULL MULTI-ACTION AUDIT =====")
+    print("Dataset root:", DATASET_ROOT)
+
+    errors = []
+    action_counts = {action: 0 for action in EXPECTED_ACTIONS}
+    checked = 0
+
+    if not MANIFEST_PATH.is_file():
+        print("ERROR: manifest.csv is missing")
+        return False
+
+    with open(MANIFEST_PATH, "r", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+
+        required = {
+            "frame", "action", "joint_count",
+            "image", "annotation", "visualization"
+        }
+
+        if not required.issubset(set(reader.fieldnames or [])):
+            print("ERROR: Manifest columns are incomplete")
+            return False
+
+        records = list(reader)
+
+    print("Manifest records:", len(records))
+
+    for row in records:
+        action = row["action"]
+
+        if action not in EXPECTED_ACTIONS:
+            errors.append(f"Unexpected action: {action}")
+            continue
 
         try:
-            frame_number = int(filename.replace("frame_", ""))
+            frame = int(row["frame"])
         except ValueError:
-            errors.append(f"Invalid image filename: {image_path.name}")
+            errors.append(f"Invalid frame number: {row['frame']}")
             continue
 
-        json_path = annotation_folder / f"{filename}.json"
-        visualization_path = (
-            visualization_folder / f"{filename}_skeleton.png"
-        )
+        action_folder = DATASET_ROOT / action
 
-        if not json_path.exists():
-            errors.append(f"Missing annotation: {filename}")
-            continue
+        expected_paths = {
+            "image": action_folder / "images" / f"frame_{frame:04d}.png",
+            "annotation": action_folder / "annotations" / f"frame_{frame:04d}.json",
+            "visualization": action_folder / "visualizations" / f"frame_{frame:04d}_skeleton.png"
+        }
 
-        if not visualization_path.exists():
-            errors.append(f"Missing visualization: {filename}")
+        for column, expected_path in expected_paths.items():
+            if not row.get(column):
+                errors.append(f"Empty {column} path: {action} frame {frame}")
+                continue
 
-        try:
-            with open(json_path, "r", encoding="utf-8") as file:
-                data = json.load(file)
+            actual_path = (BASE_DIR / row[column]).resolve()
 
-            if data.get("frame") != frame_number:
-                errors.append(f"Incorrect frame number: {filename}")
+            if actual_path != expected_path.resolve():
+                errors.append(f"Incorrect {column} path: {action} frame {frame}")
 
-            if data.get("action") != "jogging":
-                errors.append(f"Unexpected action: {filename}")
+            if not actual_path.is_file():
+                errors.append(f"Missing {column}: {action} frame {frame}")
 
-            joints = data.get("joints", {})
+        if row.get("joint_count") != "17":
+            errors.append(f"Incorrect joint count in manifest: {action} frame {frame}")
 
-            if set(joints.keys()) != EXPECTED_JOINTS:
-                errors.append(f"Incorrect joint names: {filename}")
+        annotation_path = expected_paths["annotation"]
 
-            for name, joint in joints.items():
-
-                coords_3d = joint.get("3d")
-                coords_2d = joint.get("2d")
-                in_frame = joint.get("in_frame")
-
-                if not isinstance(coords_3d, list) or len(coords_3d) != 3:
-                    errors.append(
-                        f"Invalid 3D coordinates: {filename}, {name}"
-                    )
-                    continue
-
-                if not isinstance(coords_2d, list) or len(coords_2d) != 2:
-                    errors.append(
-                        f"Invalid 2D coordinates: {filename}, {name}"
-                    )
-                    continue
-
-                coordinates = coords_3d + coords_2d
-
-                if not all(
-                    isinstance(value, (int, float))
-                    and not isinstance(value, bool)
-                    and math.isfinite(value)
-                    for value in coordinates
-                ):
-                    errors.append(
-                        f"Invalid numeric value: {filename}, {name}"
-                    )
-
-                if not isinstance(in_frame, bool):
-                    errors.append(
-                        f"Invalid in_frame flag: {filename}, {name}"
-                    )
-
-                elif in_frame:
-                    x, y = coords_2d
-
-                    if not (0 <= x <= 1 and 0 <= y <= 1):
-                        errors.append(
-                            f"Out-of-bounds joint: {filename}, {name}"
-                        )
-
-            checked_frames += 1
-
-        except Exception as error:
-            errors.append(f"JSON error in {filename}: {error}")
-
-    # Check manifest
-    manifest_records = 0
-
-    if not manifest_path.exists():
-        errors.append(f"Manifest missing: {manifest_path.name}")
-
-    else:
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as file:
-                reader = csv.DictReader(file)
-
-                for row in reader:
-                    manifest_records += 1
-
-                    for column in [
-                        "image", "annotation", "visualization"
-                    ]:
-                        if not row.get(column):
-                            errors.append(
-                                f"Empty manifest field: {column}"
-                            )
-                            continue
-
-                        referenced_path = BASE_DIR / row[column]
-
-                        if not referenced_path.exists():
-                            errors.append(
-                                f"Manifest path missing: {row[column]}"
-                            )
-
-            if manifest_records != len(image_files):
-                errors.append(
-                    f"Expected {len(image_files)} manifest records, "
-                    f"found {manifest_records}"
+        if annotation_path.is_file():
+            try:
+                annotation_errors = check_annotation(
+                    annotation_path, frame, action
                 )
 
-        except Exception as error:
-            errors.append(f"Manifest error: {error}")
+                for error in annotation_errors:
+                    errors.append(f"{action} frame {frame}: {error}")
 
-    print("Frames checked:", checked_frames)
-    print("Manifest records:", manifest_records)
+            except Exception as error:
+                errors.append(f"JSON error: {action} frame {frame}: {error}")
+
+        checked += 1
+        action_counts[action] += 1
+
+    expected_counts = {"jogging": 100, "walking": 100}
+
+    for action in EXPECTED_ACTIONS:
+        if action_counts[action] != expected_counts[action]:
+            errors.append(
+                f"{action}: expected {expected_counts[action]}, "
+                f"found {action_counts[action]}"
+            )
+
+    print("\n--- ACTION SUMMARY ---")
+    print("Jogging records:", action_counts["jogging"])
+    print("Walking records:", action_counts["walking"])
+    print("Total records checked:", checked)
     print("Expected joints per frame:", len(EXPECTED_JOINTS))
     print("Total errors:", len(errors))
 
@@ -189,54 +177,89 @@ def audit_dataset(config):
         print("\nAUDIT ERRORS:")
         for error in errors:
             print("-", error)
+        print("\nFULL DATASET AUDIT FAILED")
+        return False
 
-        print("\nAUDIT FAILED")
-
-    else:
-        print("\nSUCCESS: Dataset integrity checks passed!")
-
-    return len(errors) == 0
+    print("\nSUCCESS: Full multi-action dataset passed!")
+    return True
 
 
-# Select available datasets
-selected_configs = []
-seen_datasets = set()
+def audit_github_sample():
+    print("\n===== GITHUB SAMPLE AUDIT =====")
 
-for config in DATASET_CONFIGS:
+    errors = []
+    images = sorted((SAMPLE_ROOT / "images").glob("frame_*.png"))
+    checked = 0
 
-    dataset = config["dataset"]
+    print("Dataset:", SAMPLE_ROOT)
+    print("Frames found:", len(images))
 
-    if (
-        (dataset / "images").is_dir()
-        and (dataset / "annotations").is_dir()
-        and config["visualizations"].is_dir()
-        and config["manifest"].is_file()
-        and dataset.resolve() not in seen_datasets
-    ):
-        selected_configs.append(config)
-        seen_datasets.add(dataset.resolve())
+    if not SAMPLE_MANIFEST.is_file():
+        print("ERROR: Sample manifest missing")
+        return False
+
+    for image_path in images:
+        frame_name = image_path.stem
+        json_path = SAMPLE_ROOT / "annotations" / f"{frame_name}.json"
+        visualization_path = (
+            SAMPLE_ROOT / "visualizations" /
+            f"{frame_name}_skeleton.png"
+        )
+
+        if not json_path.is_file():
+            errors.append(f"Missing sample annotation: {frame_name}")
+            continue
+
+        if not visualization_path.is_file():
+            errors.append(f"Missing sample visualization: {frame_name}")
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            frame = int(frame_name.replace("frame_", ""))
+            action = data.get("action")
+
+            errors.extend(
+                f"{frame_name}: {error}"
+                for error in check_annotation(json_path, frame, action)
+            )
+
+            checked += 1
+
+        except Exception as error:
+            errors.append(f"Sample JSON error: {frame_name}: {error}")
+
+    with open(SAMPLE_MANIFEST, "r", encoding="utf-8") as file:
+        sample_records = list(csv.DictReader(file))
+
+    if len(sample_records) != len(images):
+        errors.append("Sample manifest record count mismatch")
+
+    print("Frames checked:", checked)
+    print("Manifest records:", len(sample_records))
+    print("Expected joints per frame:", len(EXPECTED_JOINTS))
+    print("Total errors:", len(errors))
+
+    if errors:
+        for error in errors:
+            print("-", error)
+        print("GITHUB SAMPLE AUDIT FAILED")
+        return False
+
+    print("SUCCESS: GitHub sample audit passed!")
+    return True
 
 
-if not selected_configs:
-    raise FileNotFoundError(
-        "No valid dataset and manifest combination found."
-    )
-
-
-# Run audits
-results = []
-
-for config in selected_configs:
-    results.append(audit_dataset(config))
-
+full_result = audit_full_dataset()
+sample_result = audit_github_sample()
 
 print("\n===== FINAL AUDIT SUMMARY =====")
-print("Datasets checked:", len(results))
-print("Successful audits:", sum(results))
-print("Failed audits:", len(results) - sum(results))
+print("Datasets checked: 2")
+print("Successful audits:", sum([full_result, sample_result]))
+print("Failed audits:", 2 - sum([full_result, sample_result]))
 
-if all(results):
-    print("\nSUCCESS: All available dataset audits passed!")
-
+if full_result and sample_result:
+    print("\nSUCCESS: All dataset audits passed!")
 else:
     print("\nWARNING: One or more dataset audits failed.")

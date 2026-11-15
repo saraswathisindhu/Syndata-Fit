@@ -3,36 +3,14 @@ import cv2
 import json
 from pathlib import Path
 
-# Automatically locate the dataset
-DATASET_CANDIDATES = [
-    Path("Syndata_Output"),
-    Path("../New folder/Syndata_Output"),
-    Path("sample_dataset")
-]
+BASE_DIR = Path(__file__).resolve().parent
 
-DATASET = next(
-    (
-        folder for folder in DATASET_CANDIDATES
-        if (folder / "images").is_dir()
-        and (folder / "annotations").is_dir()
-    ),
-    None
+DATASET_ROOT = (
+    BASE_DIR.parent / "New folder" / "Syndata_Output"
 )
+ACTIONS = ["jogging", "walking"]
 
-if DATASET is None:
-    raise FileNotFoundError(
-        "Dataset not found. Check the dataset folder structure."
-    )
-
-IMAGE_FOLDER = DATASET / "images"
-ANNOTATION_FOLDER = DATASET / "annotations"
-
-# Output folder
-OUTPUT_FOLDER = Path("visualized_frames")
-OUTPUT_FOLDER.mkdir(exist_ok=True)
-
-# Skeleton connections
-connections = [
+CONNECTIONS = [
     ("head", "neck"),
     ("neck", "left_shoulder"),
     ("neck", "right_shoulder"),
@@ -54,103 +32,114 @@ connections = [
     ("right_ankle", "right_toe")
 ]
 
-# Find available image frames
-image_files = sorted(IMAGE_FOLDER.glob("frame_*.png"))
+total_success = 0
+total_errors = 0
 
-success_count = 0
-errors = []
+for action in ACTIONS:
 
-for image_path in image_files:
+    dataset = DATASET_ROOT / action
+    image_folder = dataset / "images"
+    annotation_folder = dataset / "annotations"
+    output_folder = dataset / "visualizations"
 
-    try:
-        frame_number = int(
-            image_path.stem.replace("frame_", "")
-        )
+    output_folder.mkdir(parents=True, exist_ok=True)
 
-        json_path = ANNOTATION_FOLDER / f"frame_{frame_number:04d}.json"
+    image_files = sorted(image_folder.glob("frame_*.png"))
 
-        # Load image
-        image = cv2.imread(str(image_path))
+    success_count = 0
+    errors = []
 
-        if image is None:
-            raise FileNotFoundError(
-                f"Could not read image: {image_path}"
+    print(f"\n===== {action.upper()} VISUALIZATION =====")
+    print("Images found:", len(image_files))
+
+    for image_path in image_files:
+
+        try:
+            frame_number = int(
+                image_path.stem.replace("frame_", "")
             )
 
-        # Load annotation
-        with open(json_path, "r", encoding="utf-8") as file:
-            data = json.load(file)
+            json_path = annotation_folder / f"frame_{frame_number:04d}.json"
 
-        joints = data["joints"]
-
-        height, width = image.shape[:2]
-        points = {}
-
-        # Convert normalized coordinates to pixels
-        for name, joint in joints.items():
-
-            if not joint["in_frame"]:
-                continue
-
-            x, y = joint["2d"]
-
-            points[name] = (
-                int(x * (width - 1)),
-                int(y * (height - 1))
-            )
-
-        # Draw skeleton connections
-        for a, b in connections:
-
-            if a in points and b in points:
-                cv2.line(
-                    image,
-                    points[a],
-                    points[b],
-                    (0, 255, 0),
-                    3,
-                    cv2.LINE_AA
+            if not json_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing annotation: {json_path.name}"
                 )
 
-        # Draw joint points
-        for name, position in points.items():
+            image = cv2.imread(str(image_path))
 
-            cv2.circle(
-                image,
-                position,
-                6,
-                (0, 0, 255),
-                -1,
-                cv2.LINE_AA
+            if image is None:
+                raise ValueError("Cannot read image")
+
+            with open(json_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            if data.get("action") != action:
+                raise ValueError("Action label mismatch")
+
+            if data.get("frame") != frame_number:
+                raise ValueError("Frame number mismatch")
+
+            joints = data.get("joints", {})
+
+            if len(joints) != 17:
+                raise ValueError("Expected 17 joints")
+
+            height, width = image.shape[:2]
+            points = {}
+
+            for name, joint in joints.items():
+
+                if not joint["in_frame"]:
+                    continue
+
+                x, y = joint["2d"]
+
+                points[name] = (
+                    int(x * (width - 1)),
+                    int(y * (height - 1))
+                )
+
+            for a, b in CONNECTIONS:
+
+                if a in points and b in points:
+                    cv2.line(
+                        image, points[a], points[b],
+                        (0, 255, 0), 3, cv2.LINE_AA
+                    )
+
+            for point in points.values():
+                cv2.circle(
+                    image, point, 6,
+                    (0, 0, 255), -1, cv2.LINE_AA
+                )
+
+            output_path = (
+                output_folder /
+                f"frame_{frame_number:04d}_skeleton.png"
             )
 
-        # Save visualization
-        output_path = OUTPUT_FOLDER / (
-            f"frame_{frame_number:04d}_skeleton.png"
-        )
+            if not cv2.imwrite(str(output_path), image):
+                raise RuntimeError("Could not save visualization")
 
-        if not cv2.imwrite(str(output_path), image):
-            raise RuntimeError("Could not save output image")
+            success_count += 1
 
-        success_count += 1
+        except Exception as error:
+            errors.append((image_path.name, str(error)))
 
-        if success_count % 10 == 0:
-            print(f"Processed {success_count}/{len(image_files)} frames")
+    total_success += success_count
+    total_errors += len(errors)
 
-    except Exception as error:
-        errors.append((image_path.name, str(error)))
+    print("Successfully processed:", success_count)
+    print("Errors:", len(errors))
+    print("Output:", output_folder)
 
-# Final report
-print("\n===== SYNDATA-FIT BATCH VISUALIZATION =====")
-print("Dataset:", DATASET.resolve())
-print("Frames found:", len(image_files))
-print("Successfully processed:", success_count)
-print("Errors:", len(errors))
-
-if errors:
     for frame, message in errors:
-        print(f"{frame}: {message}")
-else:
-    print("SUCCESS: All available visualizations completed!")
+        print(f"ERROR: {frame}: {message}")
 
-print("Output folder:", OUTPUT_FOLDER.resolve())
+print("\n===== MULTI-ACTION VISUALIZATION SUMMARY =====")
+print("Total visualizations processed:", total_success)
+print("Total errors:", total_errors)
+
+if total_errors == 0:
+    print("SUCCESS: All action visualizations completed!")
