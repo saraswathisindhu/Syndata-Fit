@@ -4,10 +4,31 @@ import json
 import math
 from pathlib import Path
 
+# ==========================================
+# SYNDATA-FIT PORTABLE DATASET AUDIT
+# ==========================================
+
 BASE_DIR = Path(__file__).resolve().parent
 
-DATASET_ROOT = (
+DATASET_CANDIDATES = [
+    BASE_DIR / "Syndata_Output",
+    BASE_DIR.parent / "Syndata_Output",
     BASE_DIR.parent / "New folder" / "Syndata_Output"
+]
+
+DATASET_ROOT = next(
+    (
+        folder for folder in DATASET_CANDIDATES
+        if folder.is_dir()
+        and any(
+            (item / "images").is_dir()
+            and (item / "annotations").is_dir()
+            and (item / "visualizations").is_dir()
+            for item in folder.iterdir()
+            if item.is_dir()
+        )
+    ),
+    None
 )
 
 MANIFEST_PATH = BASE_DIR / "manifest.csv"
@@ -21,10 +42,9 @@ EXPECTED_JOINTS = {
     "left_ankle", "right_ankle", "left_toe", "right_toe", "hips"
 }
 
-EXPECTED_ACTIONS = ["jogging", "walking"]
-
 
 def check_annotation(json_path, expected_frame, expected_action):
+
     with open(json_path, "r", encoding="utf-8") as file:
         data = json.load(file)
 
@@ -38,10 +58,18 @@ def check_annotation(json_path, expected_frame, expected_action):
 
     joints = data.get("joints", {})
 
+    if not isinstance(joints, dict):
+        return ["Invalid joints structure"]
+
     if set(joints.keys()) != EXPECTED_JOINTS:
         errors.append("Incorrect joint names")
 
     for name, joint in joints.items():
+
+        if not isinstance(joint, dict):
+            errors.append(f"Invalid joint structure: {name}")
+            continue
+
         coords_3d = joint.get("3d")
         coords_2d = joint.get("2d")
         in_frame = joint.get("in_frame")
@@ -63,12 +91,14 @@ def check_annotation(json_path, expected_frame, expected_action):
             for value in coordinates
         ):
             errors.append(f"Invalid numeric values: {name}")
+            continue
 
         if not isinstance(in_frame, bool):
             errors.append(f"Invalid in_frame flag: {name}")
 
         elif in_frame:
             x, y = coords_2d
+
             if not (0 <= x <= 1 and 0 <= y <= 1):
                 errors.append(f"Out-of-bounds joint: {name}")
 
@@ -76,18 +106,27 @@ def check_annotation(json_path, expected_frame, expected_action):
 
 
 def audit_full_dataset():
-    print("\n===== SYNDATA-FIT FULL MULTI-ACTION AUDIT =====")
+
+    print("\n===== SYNDATA-FIT FULL DATASET AUDIT =====")
+
+    if DATASET_ROOT is None:
+        print("Full dataset not found.")
+        print("Skipping full dataset audit.")
+        return None
+
     print("Dataset root:", DATASET_ROOT)
 
     errors = []
-    action_counts = {action: 0 for action in EXPECTED_ACTIONS}
+    action_counts = {}
     checked = 0
+    seen_records = set()
 
     if not MANIFEST_PATH.is_file():
         print("ERROR: manifest.csv is missing")
         return False
 
     with open(MANIFEST_PATH, "r", encoding="utf-8") as file:
+
         reader = csv.DictReader(file)
 
         required = {
@@ -103,18 +142,39 @@ def audit_full_dataset():
 
     print("Manifest records:", len(records))
 
+    actions = sorted(
+        folder.name
+        for folder in DATASET_ROOT.iterdir()
+        if folder.is_dir()
+        and (folder / "images").is_dir()
+        and (folder / "annotations").is_dir()
+        and (folder / "visualizations").is_dir()
+    )
+
+    for action in actions:
+        action_counts[action] = 0
+
     for row in records:
+
         action = row["action"]
 
-        if action not in EXPECTED_ACTIONS:
-            errors.append(f"Unexpected action: {action}")
+        if action not in action_counts:
+            errors.append(f"Unexpected action in manifest: {action}")
             continue
 
         try:
             frame = int(row["frame"])
-        except ValueError:
+        except (ValueError, TypeError):
             errors.append(f"Invalid frame number: {row['frame']}")
             continue
+
+        record_key = (action, frame)
+
+        if record_key in seen_records:
+            errors.append(f"Duplicate record: {action} frame {frame}")
+            continue
+
+        seen_records.add(record_key)
 
         action_folder = DATASET_ROOT / action
 
@@ -125,70 +185,130 @@ def audit_full_dataset():
         }
 
         for column, expected_path in expected_paths.items():
+
             if not row.get(column):
-                errors.append(f"Empty {column} path: {action} frame {frame}")
+                errors.append(
+                    f"Empty {column} path: {action} frame {frame}"
+                )
                 continue
 
             actual_path = (BASE_DIR / row[column]).resolve()
 
             if actual_path != expected_path.resolve():
-                errors.append(f"Incorrect {column} path: {action} frame {frame}")
+                errors.append(
+                    f"Incorrect {column} path: {action} frame {frame}"
+                )
 
             if not actual_path.is_file():
-                errors.append(f"Missing {column}: {action} frame {frame}")
+                errors.append(
+                    f"Missing {column}: {action} frame {frame}"
+                )
 
         if row.get("joint_count") != "17":
-            errors.append(f"Incorrect joint count in manifest: {action} frame {frame}")
+            errors.append(
+                f"Incorrect joint count in manifest: {action} frame {frame}"
+            )
 
         annotation_path = expected_paths["annotation"]
 
         if annotation_path.is_file():
+
             try:
                 annotation_errors = check_annotation(
                     annotation_path, frame, action
                 )
 
                 for error in annotation_errors:
-                    errors.append(f"{action} frame {frame}: {error}")
+                    errors.append(
+                        f"{action} frame {frame}: {error}"
+                    )
 
             except Exception as error:
-                errors.append(f"JSON error: {action} frame {frame}: {error}")
+                errors.append(
+                    f"JSON error: {action} frame {frame}: {error}"
+                )
 
         checked += 1
         action_counts[action] += 1
 
-    expected_counts = {"jogging": 100, "walking": 100}
+    # Check that every source image is represented in the manifest.
+    for action in actions:
 
-    for action in EXPECTED_ACTIONS:
-        if action_counts[action] != expected_counts[action]:
+        image_folder = DATASET_ROOT / action / "images"
+
+        image_frames = {
+            int(path.stem.replace("frame_", ""))
+            for path in image_folder.glob("frame_*.png")
+        }
+
+        manifest_frames = {
+            frame
+            for record_action, frame in seen_records
+            if record_action == action
+        }
+
+        missing_frames = image_frames - manifest_frames
+        extra_frames = manifest_frames - image_frames
+
+        if missing_frames:
             errors.append(
-                f"{action}: expected {expected_counts[action]}, "
-                f"found {action_counts[action]}"
+                f"{action}: {len(missing_frames)} images missing from manifest"
+            )
+
+        if extra_frames:
+            errors.append(
+                f"{action}: {len(extra_frames)} manifest frames have no source image"
             )
 
     print("\n--- ACTION SUMMARY ---")
-    print("Jogging records:", action_counts["jogging"])
-    print("Walking records:", action_counts["walking"])
+
+    for action in actions:
+        print(
+            f"{action.capitalize()} records:",
+            action_counts[action]
+        )
+
     print("Total records checked:", checked)
     print("Expected joints per frame:", len(EXPECTED_JOINTS))
     print("Total errors:", len(errors))
 
     if errors:
+
         print("\nAUDIT ERRORS:")
+
         for error in errors:
             print("-", error)
+
         print("\nFULL DATASET AUDIT FAILED")
         return False
 
-    print("\nSUCCESS: Full multi-action dataset passed!")
+    print("\nSUCCESS: Full dataset passed!")
     return True
 
 
 def audit_github_sample():
+
     print("\n===== GITHUB SAMPLE AUDIT =====")
 
     errors = []
-    images = sorted((SAMPLE_ROOT / "images").glob("frame_*.png"))
+
+    image_folder = SAMPLE_ROOT / "images"
+    annotation_folder = SAMPLE_ROOT / "annotations"
+    visualization_folder = SAMPLE_ROOT / "visualizations"
+
+    if not image_folder.is_dir():
+        print("ERROR: Sample images folder missing")
+        return False
+
+    if not annotation_folder.is_dir():
+        print("ERROR: Sample annotations folder missing")
+        return False
+
+    if not visualization_folder.is_dir():
+        print("ERROR: Sample visualizations folder missing")
+        return False
+
+    images = sorted(image_folder.glob("frame_*.png"))
     checked = 0
 
     print("Dataset:", SAMPLE_ROOT)
@@ -199,38 +319,54 @@ def audit_github_sample():
         return False
 
     for image_path in images:
+
         frame_name = image_path.stem
-        json_path = SAMPLE_ROOT / "annotations" / f"{frame_name}.json"
+
+        json_path = annotation_folder / f"{frame_name}.json"
+
         visualization_path = (
-            SAMPLE_ROOT / "visualizations" /
+            visualization_folder /
             f"{frame_name}_skeleton.png"
         )
 
         if not json_path.is_file():
-            errors.append(f"Missing sample annotation: {frame_name}")
+            errors.append(
+                f"Missing sample annotation: {frame_name}"
+            )
             continue
 
         if not visualization_path.is_file():
-            errors.append(f"Missing sample visualization: {frame_name}")
+            errors.append(
+                f"Missing sample visualization: {frame_name}"
+            )
 
         try:
-            with open(json_path, "r", encoding="utf-8") as file:
+            frame = int(frame_name.replace("frame_", ""))
+
+            with open(
+                json_path, "r", encoding="utf-8"
+            ) as file:
                 data = json.load(file)
 
-            frame = int(frame_name.replace("frame_", ""))
             action = data.get("action")
 
             errors.extend(
                 f"{frame_name}: {error}"
-                for error in check_annotation(json_path, frame, action)
+                for error in check_annotation(
+                    json_path, frame, action
+                )
             )
 
             checked += 1
 
         except Exception as error:
-            errors.append(f"Sample JSON error: {frame_name}: {error}")
+            errors.append(
+                f"Sample JSON error: {frame_name}: {error}"
+            )
 
-    with open(SAMPLE_MANIFEST, "r", encoding="utf-8") as file:
+    with open(
+        SAMPLE_MANIFEST, "r", encoding="utf-8"
+    ) as file:
         sample_records = list(csv.DictReader(file))
 
     if len(sample_records) != len(images):
@@ -242,8 +378,10 @@ def audit_github_sample():
     print("Total errors:", len(errors))
 
     if errors:
+
         for error in errors:
             print("-", error)
+
         print("GITHUB SAMPLE AUDIT FAILED")
         return False
 
@@ -251,15 +389,24 @@ def audit_github_sample():
     return True
 
 
+# ==========================================
+# RUN AUDITS
+# ==========================================
+
 full_result = audit_full_dataset()
 sample_result = audit_github_sample()
 
-print("\n===== FINAL AUDIT SUMMARY =====")
-print("Datasets checked: 2")
-print("Successful audits:", sum([full_result, sample_result]))
-print("Failed audits:", 2 - sum([full_result, sample_result]))
+results = [
+    result for result in [full_result, sample_result]
+    if result is not None
+]
 
-if full_result and sample_result:
-    print("\nSUCCESS: All dataset audits passed!")
+print("\n===== FINAL AUDIT SUMMARY =====")
+print("Datasets checked:", len(results))
+print("Successful audits:", sum(results))
+print("Failed audits:", len(results) - sum(results))
+
+if results and all(results):
+    print("\nSUCCESS: All available dataset audits passed!")
 else:
     print("\nWARNING: One or more dataset audits failed.")
